@@ -12,6 +12,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--java', default='java')
     parser.add_argument('--apktool-jar', required=True)
+    parser.add_argument('--multidex', action='store_true')
+    parser.add_argument('--with-resource-split', action='store_true')
     args = parser.parse_args()
     output = args.output.resolve()
     if output.is_relative_to(HERE):
@@ -20,9 +22,17 @@ def main():
     output.mkdir(parents=True, exist_ok=False)
     source = output / 'source'
     shutil.copytree(HERE / 'fixtures' / 'tiny', source)
+    if args.multidex:
+        shutil.copytree(HERE / 'fixtures' / 'multidex' / 'smali_classes2', source / 'smali_classes2')
     subprocess.run([str(java), '-jar', str(apktool), 'b', '-p', str(output / 'framework'), '-o', str(output / 'tiny.apk'), str(source)], check=True)
+    if args.with_resource_split:
+        split = output / 'split-source'
+        shutil.copytree(HERE / 'fixtures' / 'resource-split', split)
+        subprocess.run([str(java), '-jar', str(apktool), 'b', '-p', str(output / 'framework'), '-o', str(output / 'config.en.apk'), str(split)], check=True)
     with zipfile.ZipFile(output / 'tiny.xapk', 'w') as archive:
         archive.write(output / 'tiny.apk', 'nested/base.apk')
+        if args.with_resource_split:
+            archive.write(output / 'config.en.apk', 'splits/config.en.apk')
         archive.writestr('manifest.json', '{"name":"Tiny fixture"}')
     print(output / 'tiny.apk')
 

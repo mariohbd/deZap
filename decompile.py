@@ -24,6 +24,20 @@ def sha256(path):
 def write_json(path, value):
     Path(path).write_text(json.dumps(value, indent=2) + '\n', encoding='utf-8')
 
+def preserved_decode_inventory(directory):
+    """Track resources/manifest so preservation mode refuses silently ignored edits."""
+    result = {}
+    for child in directory.iterdir():
+        if child.name.startswith('smali') or child.name in ('build', 'dist', 'java_src'):
+            continue
+        paths = child.rglob('*') if child.is_dir() else [child]
+        for path in paths:
+            if path.is_symlink():
+                raise ValueError('Symlink in decoded tree')
+            if path.is_file():
+                result[path.relative_to(directory).as_posix()] = sha256(path)
+    return result
+
 def validate_zip(source, max_bytes=2 * 1024**3):
     """Validate every member before any extraction. Return APK member names."""
     with zipfile.ZipFile(source) as archive:
@@ -126,8 +140,10 @@ def main(argv=None):
             java_out = output / f'java-{index:04d}'
             run_command([tools['java'], f'-Xmx{args.heap_gib}g', '-cp', str(classes) + os.pathsep + str(tools['jadx_jar']), 'Exporter', apk, java_out, args.mode], logs, f'java-{index:04d}', args.timeout)
             summary = json.loads((java_out / 'summary.json').read_text(encoding='utf-8'))
-            report['apks'].append({'index': index, 'sha256': sha256(apk), 'java': summary})
+            members = validate_zip(source, int(args.max_expanded_gib * 1024**3)) if source.suffix.lower() == '.xapk' else [source.name]
+            report['apks'].append({'index': index, 'source_member': members[index], 'sha256': sha256(apk), 'java': summary})
             run_command([tools['java'], f'-Xmx{args.heap_gib}g', '-jar', tools['apktool_jar'], 'd', '-p', output / 'framework', '-o', output / f'decoded-{index:04d}', apk], logs, f'decode-{index:04d}', args.timeout)
+            report['apks'][-1]['preserved_decode_inventory'] = preserved_decode_inventory(output / f'decoded-{index:04d}')
         report['status'] = 'export-completed'
         report['quality'] = 'issues-detected' if any(item['java']['jadx_errors'] or item['java']['files_with_incomplete_markers'] for item in report['apks']) else 'no-java-issues-detected'
         report['limits'] = 'No proof of semantic equivalence, full recompilability, native-code recovery or security. Review Apktool logs separately.'

@@ -7,6 +7,9 @@ __pycache__/
 *.class
 *.jks
 *.keystore
+*.p12
+*.pfx
+*.idsig
 *.pem
 *.key
 *.log
