@@ -1,4 +1,6 @@
 import json
+import contextlib
+import io
 from pathlib import Path
 import stat
 import tempfile
@@ -61,5 +63,57 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(record['status'], 'launch-failed')
         self.assertIsNone(record['exit_code'])
         self.assertIn('error', record)
+
+    def test_smali_only_skips_java_tools_and_records_explicit_scope(self):
+        source = self.root / 'tiny.apk'
+        with zipfile.ZipFile(source, 'w') as z: z.writestr('classes.dex', b'own fixture')
+        tools = {}
+        for key in ('java', 'apktool'):
+            tools[key] = self.root / key; tools[key].write_bytes(b'local tool fixture')
+        output = self.root / 'export'
+        called = []
+        def decode(command, logs, label, timeout):
+            called.append((command, label))
+            self.assertEqual(label, 'decode-0000')
+            self.assertIn('-jar', command)
+            target = Path(command[command.index('-o') + 1]); target.mkdir()
+            (target / 'AndroidManifest.xml').write_text('<manifest />')
+            (target / 'smali').mkdir(); (target / 'smali/Own.smali').write_text('.class public LOwn;')
+        with patch.object(decompile, 'resolve_tool', side_effect=lambda value: Path(value)) as resolve, \
+             patch.object(decompile, 'run_command', side_effect=decode), contextlib.redirect_stdout(io.StringIO()):
+            code = decompile.main([str(source), '--output', str(output), '--java', str(tools['java']),
+                                   '--apktool-jar', str(tools['apktool']), '--smali-only',
+                                   '--javac', 'missing-javac', '--jadx-jar', 'missing-jadx'])
+        self.assertEqual(code, 0)
+        self.assertEqual([c.args[0] for c in resolve.call_args_list], [str(tools['java']), str(tools['apktool'])])
+        report = json.loads((output / 'run-summary.json').read_text())
+        self.assertEqual(report['status'], 'export-completed')
+        self.assertEqual(report['export_scope'], 'smali-and-resources')
+        self.assertEqual(report['quality'], 'java-not-exported')
+        self.assertIsNone(report['backend_sha256'])
+        self.assertEqual(report['apks'][0]['java'], {'status': 'not-exported', 'reason': 'smali-only requested'})
+        self.assertIn('AndroidManifest.xml', report['apks'][0]['preserved_decode_inventory'])
+        self.assertEqual(len(called), 1)
+        self.assertFalse((output / 'backend').exists())
+        self.assertFalse((output / 'java-0000').exists())
+
+    def test_default_export_requires_jadx_before_resolving_tools(self):
+        with patch.object(decompile, 'resolve_tool') as resolve, contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            decompile.main(['input.apk', '--output', str(self.root / 'output'), '--apktool-jar', 'local.jar'])
+        resolve.assert_not_called()
+
+    def test_smali_only_without_jadx_does_not_claim_success_after_decode_failure(self):
+        source = self.root / 'tiny.apk'
+        with zipfile.ZipFile(source, 'w') as z: z.writestr('classes.dex', b'fixture')
+        tool = self.root / 'local-tool'; tool.write_bytes(b'fixture')
+        output = self.root / 'failed-export'
+        with patch.object(decompile, 'resolve_tool', return_value=tool), \
+             patch.object(decompile, 'run_command', side_effect=RuntimeError('decode failed')), contextlib.redirect_stdout(io.StringIO()):
+            code = decompile.main([str(source), '--output', str(output), '--apktool-jar', str(tool), '--smali-only'])
+        self.assertEqual(code, 1)
+        report = json.loads((output / 'run-summary.json').read_text())
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual(report['quality'], 'java-not-exported')
+        self.assertNotIn('preserved_decode_inventory', report['apks'][0])
 
 if __name__ == '__main__': unittest.main()
